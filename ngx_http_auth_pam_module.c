@@ -72,6 +72,8 @@ static ngx_command_t  ngx_http_auth_pam_commands[] = {
       NGX_HTTP_LOC_CONF_OFFSET,
       offsetof(ngx_http_auth_pam_loc_conf_t, service_name),
       NULL },
+      
+      ngx_null_command
 };
 
 
@@ -193,6 +195,57 @@ ngx_http_auth_pam_handler(ngx_http_request_t *r)
     return ngx_http_auth_pam_authenticate(r, ctx, &ctx->passwd, alcf);
 }
 
+
+static char* create_kv(ngx_http_request_t *r, char *key, ngx_str_t ngx_value) {
+
+	char *value = (char *) ngx_value.data;
+	size_t size = strlen(key) + strlen(value) + 1 * sizeof(char);
+	char *key_value_pair = ngx_palloc(r->pool, size);
+	sprintf(key_value_pair, "%s=%s", key, value);
+	return key_value_pair;
+}
+
+/*
+ * enrich pam environment with request parameters: PROTOCOL, HOST, PORT, URI
+ */
+static void set_pam_env(pam_handle_t *pamh, ngx_http_auth_pam_loc_conf_t  *alcf, ngx_http_request_t *r) {
+
+	size_t uri_end, protocol_end;
+	u_char *uri_buf, *uri_p, *protocol_buf, *protocol_p;
+	ngx_str_t uri;
+	ngx_str_t protocol;
+
+    for (uri_end = 0; uri_end < r->uri.len; uri_end++) {
+		if (r->uri.data[uri_end] == ' ') {
+			break;
+		}
+    }
+
+    for (protocol_end = 0; protocol_end < r->http_protocol.len; protocol_end++) {
+    	if (r->http_protocol.data[protocol_end] == '/') {
+    		break;
+    	}
+    }
+
+    uri_buf = ngx_palloc(r->pool, uri_end+1);
+	uri_p = ngx_cpymem(uri_buf, r->uri.data , uri_end);
+	*uri_p ='\0';
+
+	uri.data = uri_buf;
+	uri.len = uri_end;
+
+    protocol_buf = ngx_palloc(r->pool, protocol_end+1);
+	protocol_p = ngx_cpymem(protocol_buf, r->http_protocol.data , protocol_end);
+	*protocol_p ='\0';
+
+	protocol.data = protocol_buf;
+	protocol.len = protocol_end;
+
+	pam_putenv(pamh, create_kv(r, "REQUEST_URI", uri));
+	pam_putenv(pamh, create_kv(r, "REQUEST_PROTOCOL", protocol));
+	pam_putenv(pamh, create_kv(r, "REQUEST_HOST_PORT", r->headers_in.host->value));
+}
+
 static ngx_int_t
 ngx_http_auth_pam_authenticate(ngx_http_request_t *r,
     ngx_http_auth_pam_ctx_t *ctx, ngx_str_t *passwd, void *conf)
@@ -252,6 +305,8 @@ ngx_http_auth_pam_authenticate(ngx_http_request_t *r,
 		      pam_strerror(pamh, rc));
         return NGX_HTTP_INTERNAL_SERVER_ERROR;
     }
+
+    set_pam_env(pamh, alcf, r);
 
     /* try to authenticate user, log error on failure */
     if ((rc = pam_authenticate(pamh,
